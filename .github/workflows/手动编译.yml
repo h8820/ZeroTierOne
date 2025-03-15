@@ -20,7 +20,7 @@ on:
         description: '请选择linux目标CPU架构'
         required: true
         type: choice
-        default: 'aarch64'
+        default: 'mipsel'
         options:
           - aarch64
           - armv7m-eabi
