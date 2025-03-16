@@ -1,4 +1,4 @@
-name: 手动编译zerotier
+name: 手动编译zerotier2
 
 on:
   workflow_dispatch:
