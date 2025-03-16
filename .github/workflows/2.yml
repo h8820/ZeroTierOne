@@ -1,0 +1,98 @@
+name: 手动编译zerotier
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '编译github.zerotier/ZeroTierOne分支或版本号，默认主分支main'
+        required: true
+        default: 'main'
+      ztpath:
+        description: '自定义密钥路径（官方默认：  /var/lib/zerotier-one）'
+        required: false
+        default: ''
+      linux:
+        description: 'linux内核是否低于4.0 （低于4.0的新版本运行会报错 set MAC）'
+        required: true
+        default: false
+        type: boolean
+      upx:
+        description: '编译完成后是否使用upx压缩，部分架构压缩后运行异常'
+        required: true
+        default: false
+        type: boolean
+
+env:
+  branch: "${{ github.event.inputs.branch }}"
+  target: "mipsel"
+  ztpath: "${{ github.event.inputs.ztpath }}"
+
+jobs:
+  zerotier:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载源码
+        run: |
+          dest_dir=/opt/zerotier
+          if [[ ${#branch} -ge 7 && $branch =~ ^[0-9a-fA-F]+$ ]]; then
+            git clone https://github.com/zerotier/ZeroTierOne "$dest_dir"
+            cd "$dest_dir"
+            git checkout $branch
+          else
+            git clone -b $branch https://github.com/zerotier/ZeroTierOne "$dest_dir"
+          fi
+
+      - name: 修改内核低于4.0的MAC报错
+        if: github.event.inputs.linux == 'true'
+        run: |
+          cd /opt/zerotier
+          if [ $(grep -c "ioctl(sock, SIOCSIFHWADDR, (void" ./osdep/LinuxEthernetTap.cpp) -eq 2 ]; then
+            MAC_LINE=$(grep -n "ioctl(sock, SIOCSIFHWADDR, (void" ./osdep/LinuxEthernetTap.cpp | head -2 | tail -1 | awk '{print $1}' | tr -d ":")
+            sed -i "$((MAC_LINE)),+5d" ./osdep/LinuxEthernetTap.cpp
+          fi
+          sed -i '/ifr.ifr_flags |= IFF_UP;/a\    ifr.ifr_flags &= ~IFF_NOARP;\n    ifr.ifr_flags &= ~IFF_NOTRAILERS;' ./osdep/LinuxEthernetTap.cpp
+
+      - name: 修改自定义密钥路径
+        if: github.event.inputs.ztpath != ''
+        run: |
+          cd /opt/zerotier
+          sed -i "s|/var/lib/zerotier-one|$ztpath|g" ./osdep/OSUtils.cpp
+
+      - name: 下载编译工具链
+        run: |
+          mkdir -p /opt/musl_gcc
+          wget -q -c https://musl.cc/mipsel-linux-muslsf-cross.tgz -P /opt/musl_gcc/
+          tar -xf /opt/musl_gcc/mipsel-linux-muslsf-cross.tgz -C /opt/musl_gcc/
+
+      - name: 开始编译zerotier
+        run: |
+          cd /opt/zerotier
+          export PATH=$PATH:/opt/musl_gcc/mipsel-linux-muslsf-cross/bin
+          export TARGET=mipsel-linux-muslsf
+          export CC=${TARGET}-gcc
+          export CXX=${TARGET}-g++
+          export STRIP=${TARGET}-strip
+          make -j$(nproc)
+          mkdir -p /opt/bin
+          mv -f zerotier-one /opt/bin/
+          cd /opt/bin
+          $STRIP ./zerotier-one
+
+      - name: 安装 UPX
+        if: github.event.inputs.upx == 'true'
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+          install-only: true
+
+      - name: UPX压缩
+        if: github.event.inputs.upx == 'true'
+        run: |
+          cd /opt/bin
+          upx --lzma --best zerotier-one
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerotier-mipsel
+          path: /opt/bin/*
