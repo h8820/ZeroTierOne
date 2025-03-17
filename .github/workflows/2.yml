@@ -124,3 +124,14 @@ jobs:
         with:
           name: zerotier${{ env.version }}-${{ env.target }}
           path: /opt/bin/*
+
+      - name: Zip the entire bin directory
+        run: |
+              cd /opt
+              zip -r bin.zip bin/
+      
+      - name: Upload the zip file
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-files
+          path: /opt/bin.zip
