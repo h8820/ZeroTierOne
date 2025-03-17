@@ -1,4 +1,4 @@
-name: 手动编译zerotier2
+name: 手动编译zerotier
 
 on:
   workflow_dispatch:
@@ -16,6 +16,13 @@ on:
         required: true
         default: false
         type: boolean
+      target:
+        description: '请选择linux目标CPU架构'
+        required: true
+        type: choice
+        default: 'mipsel'
+        options:
+          - mipsel
       upx:
         description: '编译完成后是否使用upx压缩，部分架构压缩后运行异常'
         required: true
@@ -24,59 +31,79 @@ on:
 
 env:
   branch: "${{ github.event.inputs.branch }}"
-  target: "mipsel"
+  target: "${{ github.event.inputs.target }}"
   ztpath: "${{ github.event.inputs.ztpath }}"
 
 jobs:
   zerotier:
     runs-on: ubuntu-latest
     steps:
+
       - name: 下载源码
         run: |
-          dest_dir=/opt/zerotier
-          if [[ ${#branch} -ge 7 && $branch =~ ^[0-9a-fA-F]+$ ]]; then
-            git clone https://github.com/zerotier/ZeroTierOne "$dest_dir"
-            cd "$dest_dir"
-            git checkout $branch
-          else
-            git clone -b $branch https://github.com/zerotier/ZeroTierOne "$dest_dir"
-          fi
-
+            dest_dir=/opt/zerotier
+            if [[ ${#branch} -ge 7 && $branch =~ ^[0-9a-fA-F]+$ ]]; then
+              git clone https://github.com/zerotier/ZeroTierOne "$dest_dir"
+              cd "$dest_dir"
+              git checkout $branch
+            else
+              git clone -b $branch https://github.com/zerotier/ZeroTierOne "$dest_dir"
+            fi
+        
       - name: 修改内核低于4.0的MAC报错
         if: github.event.inputs.linux == 'true'
         run: |
-          cd /opt/zerotier
-          if [ $(grep -c "ioctl(sock, SIOCSIFHWADDR, (void" ./osdep/LinuxEthernetTap.cpp) -eq 2 ]; then
-            MAC_LINE=$(grep -n "ioctl(sock, SIOCSIFHWADDR, (void" ./osdep/LinuxEthernetTap.cpp | head -2 | tail -1 | awk '{print $1}' | tr -d ":")
-            sed -i "$((MAC_LINE)),+5d" ./osdep/LinuxEthernetTap.cpp
-          fi
-          sed -i '/ifr.ifr_flags |= IFF_UP;/a\    ifr.ifr_flags &= ~IFF_NOARP;\n    ifr.ifr_flags &= ~IFF_NOTRAILERS;' ./osdep/LinuxEthernetTap.cpp
-
+            cd /opt/zerotier
+            if [ $(cat ./osdep/LinuxEthernetTap.cpp | grep -c "ioctl(sock, SIOCSIFHWADDR, (void") -eq 2 ]; then
+              MAC="$(grep -n "ioctl(sock, SIOCSIFHWADDR, (void" ./osdep/LinuxEthernetTap.cpp | head -2 | tail -1 | awk '{print $1}' | tr -d ": ")" && echo -e "\n\033[42;31;5;1m 删除第 ${MAC} 行 \n\033[0m" && sed -i "$((MAC)),+5d" ./osdep/LinuxEthernetTap.cpp 
+            fi
+            sed -i '/ifr.ifr_flags |= IFF_UP;/a\ \ \ \ ifr.ifr_flags &= ~IFF_NOARP;\n\ \ \ \ ifr.ifr_flags &= ~IFF_NOTRAILERS;' ./osdep/LinuxEthernetTap.cpp
+            cat ./osdep/LinuxEthernetTap.cpp
+            
       - name: 修改自定义密钥路径
         if: github.event.inputs.ztpath != ''
         run: |
-          cd /opt/zerotier
-          sed -i "s|/var/lib/zerotier-one|$ztpath|g" ./osdep/OSUtils.cpp
-
+            cd /opt/zerotier
+            echo -e "\n\033[42;31;5;1m 修改 ${target} 架构自定义密钥存储路径 ${ztpath}\n\033[0m"
+            sed -i "s|/var/lib/zerotier-one|$ztpath|g" ./osdep/OSUtils.cpp
+            
       - name: 下载编译工具链
         run: |
-          mkdir -p /opt/musl_gcc
-          wget -q -c https://musl.cc/mipsel-linux-muslsf-cross.tgz -P /opt/musl_gcc/
-          tar -xf /opt/musl_gcc/mipsel-linux-muslsf-cross.tgz -C /opt/musl_gcc/
+            cd /opt/zerotier
+            TARGET=mipsel-linux-muslsf
+            echo "TARGET=$TARGET" >> $GITHUB_ENV
+            mkdir -p /opt/musl_gcc 
+            echo -e "\n\033[42;31;5;1m 开始下载 ${TARGET}-cross工具链.. \n\033[0m"
+            wget -q -c https://musl.cc/${TARGET}-cross.tgz -P /opt/musl_gcc/
+            echo -e "\n\033[42;31;5;1m 开始解压 ${TARGET}-cross工具链.. \n\033[0m"
+            tar -xf /opt/musl_gcc/${TARGET}-cross.tgz -C /opt/musl_gcc/
+            echo -e "\n\033[42;31;5;1m 查看 ${TARGET}-gcc信息 \n\033[0m"
+            /opt/musl_gcc/${TARGET}-cross/bin/${TARGET}-gcc -v
+            sudo timedatectl set-timezone "Asia/Shanghai"
 
       - name: 开始编译zerotier
         run: |
-          cd /opt/zerotier
-          export PATH=$PATH:/opt/musl_gcc/mipsel-linux-muslsf-cross/bin
-          export TARGET=mipsel-linux-muslsf
-          export CC=${TARGET}-gcc
-          export CXX=${TARGET}-g++
-          export STRIP=${TARGET}-strip
-          make -j$(nproc)
-          mkdir -p /opt/bin
-          mv -f zerotier-one /opt/bin/
-          cd /opt/bin
-          $STRIP ./zerotier-one
+            cd /opt/zerotier
+            version=$(cat ./zerotier-one.spec | awk -F'Version:' 'NR==2 {print $2}' | tr -d ' ')
+            echo "version=_${version}" >> $GITHUB_ENV
+            sed -i '/include objects.mk/i    LDLIBS+=-latomic' ./make-linux.mk
+
+            export PATH=$PATH:/opt/musl_gcc/${TARGET}-cross/bin
+            export CORSS_PREFI=/opt/musl_gcc/${TARGET}-cross/bin/${TARGET}-
+            export CC=/opt/musl_gcc/${TARGET}-cross/bin/${TARGET}-gcc
+            export CXX=/opt/musl_gcc/${TARGET}-cross/bin/${TARGET}-g++
+            export STRIP=/opt/musl_gcc/${TARGET}-cross/bin/${TARGET}-strip
+            
+            echo -e "\n\033[42;31;5;1m 开始编译... \n\033[0m"
+            CC=${TARGET}-gcc \
+            ZT_STATIC=1 \
+            make -j$(nproc)
+
+            mkdir -p /opt/bin
+            echo "zerotier-one ：`ls -alh ./zerotier-one | awk '{print $5}'`"
+            mv -f zerotier-one /opt/bin/
+            cd /opt/bin
+            $STRIP ./zerotier-one
 
       - name: 安装 UPX
         if: github.event.inputs.upx == 'true'
@@ -84,15 +111,16 @@ jobs:
         with:
           version: latest
           install-only: true
-
+          
       - name: UPX压缩
         if: github.event.inputs.upx == 'true'
         run: |
           cd /opt/bin
           upx --lzma --best zerotier-one
-
+          echo "zerotier-one ：`ls -alh ./zerotier-one | awk '{print $5}'`"
+          
       - name: 上传
         uses: actions/upload-artifact@v4
         with:
-          name: zerotier-mipsel
+          name: zerotier${{ env.version }}-${{ env.target }}
           path: /opt/bin/*
